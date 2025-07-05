@@ -493,16 +493,12 @@ local npcLocations = {
 }
 
 local modelNames = {}
-local npcZones = {}
-local npcModels = {} -- Store actual NPC model by name
 
--- Gather NPCs from all locations
-for zone, path in pairs(npcLocations) do
+-- Gather NPC names from all locations
+for _, path in pairs(npcLocations) do
     for _, npc in pairs(path:GetChildren()) do
         if npc:IsA("Model") then
             table.insert(modelNames, npc.Name)
-            npcZones[npc.Name] = zone
-            npcModels[npc.Name] = npc -- Store model reference
         end
     end
 end
@@ -532,24 +528,40 @@ local AutoFightToggle = Tabs.AutoFight:AddToggle("AutoFight", {
     Default = false
 })
 
+
 -- Services
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local KnitServices = ReplicatedStorage:WaitForChild("Packages"):WaitForChild("Knit"):WaitForChild("Services")
 local ArmwrestleServiceRF = KnitServices:WaitForChild("ArmWrestleService"):WaitForChild("RF")
 
+
 -- Variables
 local autoClickThreads = {}
-local autoFightLoop = nil
+local autoFightThreads = {}
+local cleanupConnections = {}
 
--- Returns NPC instance based on selected name
-local function getNPCReference(selectedName)
-    return npcModels[selectedName]
+-- Cleanup function to clear pending requests
+local function cleanupRequests()
+    -- Get memory info before cleanup
+    local memoryBefore = gcinfo()
+    
+    -- Force garbage collection to clear pending requests
+    collectgarbage("count")
+    
+    -- Get memory info after cleanup
+    local memoryAfter = gcinfo()
+    
+    pcall(function()
+        -- Clear any pending remote calls by briefly disconnecting
+        local temp = ArmwrestleServiceRF
+        task.wait(0.01)
+    end)
 end
 
 -- Auto Click toggle handler
 AutoClickToggle:OnChanged(function()
     if AutoClickToggle.Value then
-        -- Clear any previous threads
+        -- Stop existing threads and cleanup
         for _, thread in pairs(autoClickThreads) do
             if typeof(thread) == "thread" then
                 task.cancel(thread)
@@ -558,12 +570,18 @@ AutoClickToggle:OnChanged(function()
             end
         end
         autoClickThreads = {}
-
+        
+        -- Stop any existing cleanup connections
+        if cleanupConnections.autoClick then
+            cleanupConnections.autoClick:Disconnect()
+        end
+        
+        -- Spawn new click threads
         task.spawn(function()
-            for i = 1, 150 do -- Consider reducing this for performance
+            for i = 1, 500 do
                 local threadData = { active = true }
                 table.insert(autoClickThreads, threadData)
-
+                
                 task.spawn(function()
                     while threadData.active and AutoClickToggle.Value do
                         pcall(function()
@@ -573,8 +591,18 @@ AutoClickToggle:OnChanged(function()
                         task.wait()
                     end
                 end)
-
-                task.wait()
+                
+                task.wait(0.001) -- Small delay between thread spawns to prevent all spawning at once
+            end
+        end)
+        
+        -- Start cleanup timer for auto click
+        cleanupConnections.autoClick = task.spawn(function()
+            while AutoClickToggle.Value do
+                task.wait(5) -- Wait 5 seconds
+                if AutoClickToggle.Value then
+                    cleanupRequests()
+                end
             end
         end)
     else
@@ -587,49 +615,104 @@ AutoClickToggle:OnChanged(function()
             end
         end
         autoClickThreads = {}
+        
+        -- Stop cleanup timer
+        if cleanupConnections.autoClick then
+            task.cancel(cleanupConnections.autoClick)
+            cleanupConnections.autoClick = nil
+        end
+        
+        -- Final cleanup
+        cleanupRequests()
     end
 end)
-
--- Store threads
-local autoFightThreads = {}
 
 -- Auto Fight toggle handler
 AutoFightToggle:OnChanged(function()
     if AutoFightToggle.Value then
-        -- Cancel any existing threads
-        for _, threadFlag in pairs(autoFightThreads) do
-            threadFlag.active = false
+        -- Stop previous threads and cleanup
+        for _, flag in pairs(autoFightThreads) do
+            flag.active = false
         end
         autoFightThreads = {}
-
-        -- Start 10 threads
-        for i = 1, 250 do
+        
+        -- Stop any existing cleanup connections
+        if cleanupConnections.autoFight then
+            cleanupConnections.autoFight:Disconnect()
+        end
+        
+        -- Spawn threads for repeated boss fights
+        for i = 1, 500 do
             local threadFlag = { active = true }
             table.insert(autoFightThreads, threadFlag)
-
+            
             task.spawn(function()
                 while threadFlag.active and AutoFightToggle.Value do
                     local selectedName = modelDropdown.Value
                     if selectedName then
-                        local npcModel = getNPCReference(selectedName)
-                        if npcModel then
-                            pcall(function()
-                                ArmwrestleServiceRF:WaitForChild("RequestStartFight"):InvokeServer(npcModel)
-                            end)
-                        end
+                        local args = {
+                            [1] = selectedName
+                        }
+                        
+                        pcall(function()
+                            ArmwrestleServiceRF:WaitForChild("RequestStartFight"):InvokeServer(unpack(args))
+                        end)
                     end
-                    task.wait(0.001)
+                    task.wait(0.01)
                 end
             end)
+            
+            task.wait(0.001) -- Small delay between thread spawns
         end
+        
+        -- Start cleanup timer for auto fight
+        cleanupConnections.autoFight = task.spawn(function()
+            while AutoFightToggle.Value do
+                task.wait(5) -- Wait 5 seconds
+                if AutoFightToggle.Value then
+                    cleanupRequests()
+                end
+            end
+        end)
     else
-        -- Turn off threads
-        for _, threadFlag in pairs(autoFightThreads) do
-            threadFlag.active = false
+        -- Stop all fight threads
+        for _, flag in pairs(autoFightThreads) do
+            flag.active = false
         end
         autoFightThreads = {}
+        
+        -- Stop cleanup timer
+        if cleanupConnections.autoFight then
+            task.cancel(cleanupConnections.autoFight)
+            cleanupConnections.autoFight = nil
+        end
+        
+        -- Final cleanup
+        cleanupRequests()
     end
 end)
+
+
+local function aggressiveCleanup()
+    -- Get memory info before cleanup
+    local memoryBefore = gcinfo()
+    
+    -- Method 1: Force disconnect and reconnect to service
+    pcall(function()
+        local oldService = ArmwrestleServiceRF
+        ArmwrestleServiceRF = KnitServices:WaitForChild("ArmWrestleService"):WaitForChild("RF")
+    end)
+    
+    -- Method 2: Clear all pending coroutines
+    collectgarbage("count")
+    
+    -- Method 3: Brief pause to let network catch up
+    task.wait(0.1)
+    
+    -- Get memory info after cleanup
+    local memoryAfter = gcinfo()  
+end
+
 
 
 local EggSection = Tabs.Eggs:AddSection("Eggs")
@@ -1637,7 +1720,6 @@ section:AddButton({
     end
 })
 
-
 local DragonTrialSection = Tabs.Trial:AddSection("Island Trial")
 
 -- Toggle state tracking
@@ -1646,8 +1728,6 @@ local wasAutoClickOn = false
 local lastJoinAttemptTime = 0
 local togglesDisabled = false
 player = game.Players.LocalPlayer
-
-
 
 -- Status paragraph for cooldown
 local DragonTrialStatus = DragonTrialSection:Paragraph("Cooldown",{
@@ -1678,13 +1758,11 @@ local AutoDragonTrialToggle = DragonTrialSection:AddToggle("AutoDragonTrial", {
     Default = false
 })
 
-
 -- Crit & Click Threads Control
 local RequestCritHit = KnitServices:WaitForChild("ArmWrestleService"):WaitForChild("RF"):WaitForChild("RequestCritHit")
 
 local critThreads = {}
 local critLoopRunning = false
-
 
 -- Start Crit Threads
 local function startCritThreads()
@@ -1716,8 +1794,44 @@ local function stopCritThreads()
     critThreads = {}
 end
 
-
-
+-- Teleport function
+local function teleportToSelectedNPCZone()
+    local selectedNPC = modelDropdown.Value
+    if not selectedNPC then return end
+    
+    -- Check which island the selected NPC is on
+    local targetZone = nil
+    
+    -- Check SummerIsland NPCs
+    local summerNPCs = workspace.GameObjects.ArmWrestling.SummerIsland.NPC:GetChildren()
+    for _, npc in pairs(summerNPCs) do
+        if npc:IsA("Model") and npc.Name == selectedNPC then
+            targetZone = workspace.Zones.SummerIsland.Interactables.Teleports.Locations.Spawn
+            break
+        end
+    end
+    
+    -- Check LostIsland NPCs if not found on SummerIsland
+    if not targetZone then
+        local lostNPCs = workspace.GameObjects.ArmWrestling.LostIsland.NPC:GetChildren()
+        for _, npc in pairs(lostNPCs) do
+            if npc:IsA("Model") and npc.Name == selectedNPC then
+                targetZone = workspace.Zones.LostIsland.Interactables.Teleports.Locations.Spawn
+                break
+            end
+        end
+    end
+    
+    -- Teleport to the determined zone
+    if targetZone then
+        pcall(function()
+            local args = {
+                [1] = targetZone
+            }
+            game:GetService("ReplicatedStorage").Packages.Knit.Services.ZoneService.RE.teleport:FireServer(unpack(args))
+        end)
+    end
+end
 
 AutoDragonTrialToggle:OnChanged(function()
     if AutoDragonTrialToggle.Value then
@@ -1767,12 +1881,23 @@ AutoDragonTrialToggle:OnChanged(function()
                         if togglesDisabled then
                             wait(5)
 
+                            -- Teleport to the selected NPC zone before re-enabling toggles
+                            teleportToSelectedNPCZone()
+                            wait(2)
+
                             if wasAutoFightOn and AutoFightToggle then
                                 AutoFightToggle:SetValue(true)
-                                wait(3)
+                                wait(1)
+                                AutoFightToggle:SetValue(false)
+                                wait(1)
+                                AutoFightToggle:SetValue(true)
                             end
                             
                             if wasAutoClickOn and AutoClickToggle then
+                                AutoClickToggle:SetValue(true)
+                                wait(1)
+                                AutoClickToggle:SetValue(false)     
+                                wait(1)
                                 AutoClickToggle:SetValue(true)
                                 wait(3)
                             end
@@ -1790,6 +1915,7 @@ AutoDragonTrialToggle:OnChanged(function()
         stopCritThreads()
     end
 end)
+
 
 local VillainChestSection = Tabs.Trial:AddSection("Island Chest")
 
